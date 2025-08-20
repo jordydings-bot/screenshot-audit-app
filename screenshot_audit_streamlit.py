@@ -1,85 +1,54 @@
 import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-import os
-import tempfile
-from io import BytesIO
-import zipfile
-import time
+from playwright.sync_api import sync_playwright
+from PIL import Image
+import io, zipfile, math
 
-# --- Screenshot function ---
-def take_screenshots(url, mode="fullpage", max_screens=None):
-    # Use temporary folder to store screenshots
-    output_folder = os.path.join(tempfile.gettempdir(), "screenshots")
-    os.makedirs(output_folder, exist_ok=True)
+st.title("Website Screenshot Audit")
 
-    # Set up Selenium Chrome
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--window-size=1920,1080")
-    driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
-    
-    driver.get(url)
-    time.sleep(2)  # wait for page to load
+url = st.text_input("Website URL")
+mode = st.radio("Screenshot mode", ["Full page", "Split 1080p"])
+max_screens = st.number_input("Max screenshots (0 for unlimited)", min_value=0, value=0)
+run_button = st.button("Run Screenshot Audit")
+
+if run_button and url:
+    st.info("Running screenshot process...")
 
     screenshots = []
 
-    if mode == "fullpage":
-        total_height = driver.execute_script("return document.body.scrollHeight")
-        driver.set_window_size(1920, total_height)
-        file_path = os.path.join(output_folder, "screenshot_1.png")
-        driver.save_screenshot(file_path)
-        screenshots.append(file_path)
-    else:  # split into 1080p sections
-        scroll_height = driver.execute_script("return document.body.scrollHeight")
-        sections = (scroll_height // 1080) + 1
-        for i in range(sections):
-            driver.execute_script(f"window.scrollTo(0, {i*1080})")
-            time.sleep(0.5)
-            file_path = os.path.join(output_folder, f"screenshot_{i+1}.png")
-            driver.save_screenshot(file_path)
-            screenshots.append(file_path)
-            if max_screens and i+1 >= max_screens:
-                break
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(url)
+        
+        if mode == "Full page":
+            img_bytes = page.screenshot(full_page=True)
+            screenshots.append(("full_page.png", img_bytes))
+        else:
+            # Get total page height
+            page_height = page.evaluate("document.body.scrollHeight")
+            viewport_height = 1080
+            num_screens = math.ceil(page_height / viewport_height)
+            if max_screens > 0:
+                num_screens = min(num_screens, max_screens)
 
-    driver.quit()
-    return output_folder, screenshots
-
-# --- ZIP creation function ---
-def create_zip(folder):
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zipf:
-        for root, _, files in os.walk(folder):
-            for file in files:
-                file_path = os.path.join(root, file)
-                zipf.write(file_path, arcname=file)  # store only filenames
-    zip_buffer.seek(0)
-    return zip_buffer
-
-# --- Streamlit App ---
-st.title("Website Screenshot Audit Tool")
-
-url = st.text_input("Enter website URL:")
-mode = st.radio("Screenshot mode:", ["Full-page (single)", "Split into 1080p sections"])
-max_screens = st.number_input("Max screenshots (leave 0 for all pages):", min_value=0, value=0)
-
-if st.button("Run Screenshot Audit") and url:
-    st.info("Running screenshot audit...")
-    split_mode = "split" if mode.startswith("Split") else "fullpage"
-    folder, screenshots = take_screenshots(url, mode=split_mode, max_screens=max_screens or None)
-    st.success(f"Captured {len(screenshots)} screenshots!")
-
-    # Create ZIP for download
-    zip_file = create_zip(folder)
+            for i in range(num_screens):
+                page.evaluate(f"window.scrollTo(0, {i * viewport_height})")
+                st.text(f"Capturing section {i+1}/{num_screens}")
+                img_bytes = page.screenshot(clip={"x":0, "y":i*viewport_height, "width":1920, "height":viewport_height})
+                screenshots.append((f"section_{i+1}.png", img_bytes))
+        
+        browser.close()
+    
+    # Zip the screenshots for download
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "a") as zf:
+        for name, img_bytes in screenshots:
+            zf.writestr(name, img_bytes)
+    
+    st.success(f"Captured {len(screenshots)} screenshot(s)!")
     st.download_button(
         label="Download all screenshots",
-        data=zip_file,
+        data=zip_buffer.getvalue(),
         file_name="screenshots.zip",
         mime="application/zip"
     )
-
-    # Optional: Show previews
-    st.subheader("Preview screenshots:")
-    for s in screenshots:
-        st.image(s)
