@@ -1,5 +1,0 @@
-[server]
-headless = true
-
-[run]
-command = "playwright install chromium && streamlit run screenshot_audit_streamlit.py"
